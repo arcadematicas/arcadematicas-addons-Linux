@@ -1,0 +1,97 @@
+#!/bin/bash
+# Sunshine Installer para Batocera - versión mejorada con detección real de prerelease
+# Creado por ChatGPT y ArcadeMaticas
+
+set -e  # Detener el script en caso de error
+
+# Verifica que batocera-flatpak esté disponible
+if ! command -v batocera-flatpak &> /dev/null; then
+    echo "Error: batocera-flatpak no se encuentra. Asegúrate de tener habilitado el soporte Flatpak en Batocera."
+    exit 1
+fi
+
+# Directorios y logs
+dir_install="/userdata/system/sunshine"
+log_file="/userdata/system/logs/sunshine_install.log"
+mkdir -p "$dir_install"
+echo "Instalador de Sunshine para Batocera iniciado..." | tee "$log_file"
+
+# Preguntar al usuario si quiere instalar la versión stable o prerelease
+echo "¿Qué versión de Sunshine quieres instalar?"
+echo "1) Versión estable (recomendada)"
+echo "2) Prerelease (puede contener errores, pero tiene las últimas mejoras)"
+read -p "Elige una opción (1 o 2): " choice
+
+if [[ "$choice" == "1" ]]; then
+    echo "Buscando la última versión estable de Sunshine..." | tee -a "$log_file"
+    latest_url=$(wget -qO- "https://api.github.com/repos/LizardByte/Sunshine/releases" | \
+        jq -r '.[] | select(.prerelease == false) | .assets[] | select(.name | endswith("sunshine_x86_64.flatpak")) | .browser_download_url' | head -n 1)
+elif [[ "$choice" == "2" ]]; then
+    echo "Buscando la última versión prerelease de Sunshine..." | tee -a "$log_file"
+    latest_url=$(wget -qO- "https://api.github.com/repos/LizardByte/Sunshine/releases" | \
+        jq -r '.[] | select(.prerelease == true) | .assets[] | select(.name | endswith("sunshine_x86_64.flatpak")) | .browser_download_url' | head -n 1)
+else
+    echo "Opción inválida. Abortando." | tee -a "$log_file"
+    exit 1
+fi
+
+# Validar que se encontró una URL válida
+if [ -z "$latest_url" ]; then
+    echo "Error: No se pudo obtener la URL de la versión seleccionada de Sunshine." | tee -a "$log_file"
+    exit 1
+fi
+
+echo "Descargando Sunshine desde: $latest_url" | tee -a "$log_file"
+wget -O "$dir_install/sunshine.flatpak" "$latest_url" | tee -a "$log_file"
+
+# Instalar Sunshine usando batocera-flatpak
+echo "Instalando Sunshine..." | tee -a "$log_file"
+batocera-flatpak install --assumeyes "$dir_install/sunshine.flatpak" | tee -a "$log_file"
+echo "Sunshine instalado correctamente." | tee -a "$log_file"
+
+# Crear servicio para Sunshine en Batocera
+service_file="$dir_install/sunshine-service.sh"
+echo "Creando servicio de Sunshine..." | tee -a "$log_file"
+cat << EOF > "$service_file"
+#!/bin/bash
+
+# Servicio de Sunshine para Batocera
+case "\$1" in
+    start)
+        export PULSE_SERVER="unix:\$(pactl info | awk '/Server String/{print \$3}')"
+        batocera-flatpak run dev.lizardbyte.app.Sunshine > /userdata/system/logs/sunshine.log 2>&1 &
+        ;;
+    stop)
+        killall -9 sunshine
+        ;;
+    restart)
+        \$0 stop
+        \$0 start
+        ;;
+esac
+EOF
+
+chmod +x "$service_file"
+echo "Servicio creado en: $service_file" | tee -a "$log_file"
+
+# Crear acceso directo en el menú de Batocera
+desktop_file="/userdata/system/.local/share/applications/sunshine.desktop"
+echo "Creando acceso directo en el menú de Batocera..." | tee -a "$log_file"
+mkdir -p "$(dirname "$desktop_file")"
+cat << EOF > "$desktop_file"
+[Desktop Entry]
+Name=Sunshine
+Comment=Iniciar Sunshine para Streaming
+Exec=batocera-flatpak run dev.lizardbyte.app.Sunshine
+Icon=applications-internet
+Terminal=false
+Type=Application
+Categories=Game;
+EOF
+
+chmod +x "$desktop_file"
+echo "Acceso directo creado en: $desktop_file" | tee -a "$log_file"
+
+# Mensaje final
+echo "Instalación de Sunshine completada. Puedes iniciarlo desde el menú de Batocera o ejecutando: $service_file start" | tee -a "$log_file"
+echo "Script creado por ChatGPT y ArcadeMaticas. ¡Disfruta tu streaming con Sunshine!"
