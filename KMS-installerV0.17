@@ -1,0 +1,143 @@
+#!/bin/bash
+set -e
+
+echo "Instalando soporte para montar .wsquashfs e ISOs con lanzamiento automático de juegos..."
+
+# Verificar si Port Proton está instalado como Flatpak
+if ! flatpak list | grep -q "ru.linux_gaming.PortProton"; then
+    echo "Port Proton no está instalado. Instalando..."
+    flatpak install flathub ru.linux_gaming.PortProton -y
+fi
+
+# Instalar dependencias esenciales
+sudo pacman -S --needed --noconfirm squashfs-tools fuse2 udisks2 fuseiso kio-extras kde-cli-tools xorg-fonts-misc libappimage
+
+# Permitir montajes FUSE para usuarios
+sudo sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf
+
+# Crear directorios necesarios
+MOUNT_DIR="$HOME/mnt-wsquashfs"
+mkdir -p "$MOUNT_DIR"
+chmod 700 "$MOUNT_DIR"
+
+SCRIPT_DIR="$HOME/.local/bin"
+mkdir -p "$SCRIPT_DIR"
+
+# -----------------------------------------------
+# SCRIPT DE MONTAJE WSQUASHFS (v11.0)
+# -----------------------------------------------
+MOUNT_SCRIPT="$SCRIPT_DIR/montar_wsquashfs.sh"
+cat > "$MOUNT_SCRIPT" << 'EOF'
+#!/bin/bash
+# Versión 11.0 - Lanzamiento robusto con Port Proton (Flatpak)
+
+# Obtener archivo desde Dolphin (usando %f)
+file_path="$1"
+
+# Validación básica
+if [[ -z "$file_path" || ! -f "$file_path" ]]; then
+    kdialog --error "Archivo no válido: $file_path"
+    exit 1
+fi
+
+# Generar nombre de punto de montaje
+filename=$(basename "$file_path" | sed 's/[^a-zA-Z0-9]/_/g')  # Eliminar caracteres especiales
+timestamp=$(date +%s)
+mount_point="$HOME/mnt-wsquashfs/${filename%.*}_$timestamp"
+
+# Crear directorio de montaje
+if ! mkdir -p "$mount_point"; then
+    kdialog --error "No se pudo crear: $mount_point"
+    exit 1
+fi
+
+# Montar imagen
+if squashfuse -o default_permissions "$file_path" "$mount_point" 2>/tmp/squashfuse-error; then
+    kdialog --passivepopup "Montado en:\n$mount_point" 5
+    dolphin "$mount_point" &
+
+    # Buscar y ejecutar autorun.cmd con Port Proton
+    autorun_cmd="$mount_point/autorun.cmd"
+    if [[ -f "$autorun_cmd" ]]; then
+        # Extraer DIR y CMD
+        dir_line=$(grep -i '^DIR=' "$autorun_cmd" | cut -d'=' -f2 | tr -d '\r' | tr -d '"')
+        cmd_line=$(grep -i '^CMD=' "$autorun_cmd" | cut -d'=' -f2 | tr -d '\r' | tr -d '"')
+
+        # Si DIR está comentado o vacío, usar raíz
+        if [[ "$dir_line" == "#"* || -z "$dir_line" ]]; then
+            exe_path="$mount_point/$cmd_line"
+        else
+            exe_path="$mount_point/$dir_line/$cmd_line"
+        fi
+
+        # Verificar y ejecutar
+        if [[ -f "$exe_path" ]]; then
+            kdialog --passivepopup "Lanzando juego con Port Proton:\n$exe_path" 5
+            # Ejecutar Port Proton (Flatpak) en una terminal con fuente alternativa
+            xterm -fn 10x20 -e "flatpak run ru.linux_gaming.PortProton '$exe_path'" &
+        else
+            kdialog --error "No se encontró el ejecutable:\n$exe_path"
+        fi
+    else
+        kdialog --error "No se encontró autorun.cmd en la imagen."
+    fi
+else
+    error=$(</tmp/squashfuse-error)
+    kdialog --error "Error al montar:\n$error"
+    rm -rf "$mount_point"
+    exit 1
+fi
+EOF
+chmod +x "$MOUNT_SCRIPT"
+
+# -----------------------------------------------
+# SERVICEMENUS ACTUALIZADOS (v12.0)
+# -----------------------------------------------
+SERVICE_MENU_DIR="$HOME/.local/share/kio/servicemenus"
+mkdir -p "$SERVICE_MENU_DIR"
+
+# Servicio para WSQUASHFS
+cat > "$SERVICE_MENU_DIR/montar_wsquashfs.desktop" << 'EOF'
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=application/x-squashfs;application/x-wsquashfs;
+Actions=MountSquashfs;UnmountSquashfs
+
+[Desktop Action MountSquashfs]
+Name=Montar SquashFS/WSquashFS
+Icon=drive-removable-media
+Exec=$HOME/.local/bin/montar_wsquashfs.sh %f
+
+[Desktop Action UnmountSquashfs]
+Name=Desmontar SquashFS/WSquashFS
+Icon=media-eject
+Exec=$HOME/.local/bin/desmontar_wsquashfs.sh %f
+EOF
+
+# Servicio para ISOs
+cat > "$SERVICE_MENU_DIR/montar_iso.desktop" << 'EOF'
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=application/x-cd-image;application/x-iso9660-image;
+Actions=MountISO;UnmountISO
+
+[Desktop Action MountISO]
+Name=Montar ISO
+Icon=drive-optical
+Exec=$HOME/.local/bin/montar_iso.sh %f
+
+[Desktop Action UnmountISO]
+Name=Desmontar ISO
+Icon=media-eject
+Exec=sh -c 'udisksctl info -b "%f" | grep -Po "loop[0-9]+" | xargs -I{} sh -c "udisksctl unmount -b /dev/{} && udisksctl loop-delete -b /dev/{}"'
+EOF
+
+# Actualizar caché de KDE
+kbuildsycoca6 --noincremental
+
+echo "Instalación completada correctamente!"
+echo "Reinicia Dolphin y prueba con:"
+echo "1. Click derecho en .wsquashfs/.squashfs → Montar"
+echo "2. El script buscará autorun.cmd y lanzará el juego con Port Proton."
