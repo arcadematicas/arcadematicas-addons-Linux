@@ -1,0 +1,67 @@
+#!/bin/bash
+set -e
+
+# Directorio de instalación y archivo de log
+dir_install="/userdata/system/hyperion"
+log_file="/userdata/system/logs/hyperion_install.log"
+
+echo "Limpiando versiones anteriores de Hyperion..." | tee "$log_file"
+rm -rf "$dir_install"
+mkdir -p "$dir_install"
+
+# Obtener la URL de la última versión de Hyperion para x86_64 (amd64)
+latest_url=$(wget -qO- https://api.github.com/repos/hyperion-project/hyperion.ng/releases/latest | sed -nE 's/.*"browser_download_url": "([^"]*Linux-amd64\.tar\.gz)".*/\1/p')
+
+if [ -z "$latest_url" ]; then
+    echo "Error: No se pudo obtener la URL de la última versión de Hyperion." | tee -a "$log_file"
+    exit 1
+fi
+
+echo "Descargando Hyperion desde: $latest_url" | tee -a "$log_file"
+wget -q --show-progress -O "$dir_install/hyperion.tar.gz" "$latest_url"
+
+echo "Extrayendo Hyperion..." | tee -a "$log_file"
+tar -xzf "$dir_install/hyperion.tar.gz" -C "$dir_install" --strip-components=1
+rm "$dir_install/hyperion.tar.gz"
+
+# Ajustar permisos del binario
+chmod +x "$dir_install/hyperion/bin/hyperiond"
+
+# Crear servicio para Hyperion en Batocera
+service_path="/userdata/system/services/hyperion"
+cat > "$service_path" << EOF
+#!/bin/bash
+
+HYPERION_PATH="$dir_install/hyperion/bin/hyperiond"
+LOG_FILE="/userdata/system/logs/hyperion.log"
+
+case "\$1" in
+    start)
+        if [ -x "\$HYPERION_PATH" ]; then
+            echo "Iniciando Hyperion..." | tee -a "\$LOG_FILE"
+            "\$HYPERION_PATH" > "\$LOG_FILE" 2>&1 &
+            echo \$! > /var/run/hyperion.pid
+        else
+            echo "Error: Hyperion no encontrado en \$HYPERION_PATH" | tee -a "\$LOG_FILE"
+        fi
+        ;;
+    stop)
+        echo "Deteniendo Hyperion..." | tee -a "\$LOG_FILE"
+        if [ -f /var/run/hyperion.pid ]; then
+            kill -9 \$(cat /var/run/hyperion.pid) && rm -f /var/run/hyperion.pid
+        else
+            killall -9 hyperiond
+        fi
+        ;;
+    restart)
+        \$0 stop
+        sleep 1
+        \$0 start
+        ;;
+esac
+EOF
+
+chmod +x "$service_path"
+
+echo "Instalación completada. Puedes activar o desactivar Hyperion desde los servicios de Batocera." | tee -a "$log_file"
+
